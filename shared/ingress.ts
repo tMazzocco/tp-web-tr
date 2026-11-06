@@ -1,5 +1,5 @@
 import { type Express, type Request, type Response } from 'express';
-import { HSStorage, HSState } from './hs-storage.ts';
+import { HSStorage } from './hs-storage.ts';
 import { verifyHandshake } from './handshake.ts';
 import { logger } from './route-logger.ts';
 import axios from 'axios';
@@ -16,13 +16,13 @@ export class IngressMessage {
         public tEmission: Date,
         public payload?: Record<string, unknown>,
         public tReception: number = Date.now(),
-    ) {}
+    ) { }
 
     static fromIngressBody(body: IngressBody): IngressMessage {
         return new IngressMessage(
             body.topic,
-            body.source.origin,
-            body.timestamp,
+            body.metadata.source.origin,
+            body.metadata.timestamp,
             body.payload,
         );
     }
@@ -60,21 +60,24 @@ export class IngressSources {
 }
 
 
-function handleIngressMessage(ingressMessage: IngressBody, ingressSources: IngressSources, origin: string): void {
+function handleIngressMessage(ingressMessage: IngressBody, ingressSources: IngressSources): void {
     ingressSources.pushMessageOnTopic(IngressMessage.fromIngressBody(ingressMessage));
 }
 
 export interface IngressBody {
+    metadata: {
+        source: URL,
+        timestamp: Date,
+        target: string
+    }
     topic: string;
-    source: URL;
-    timestamp: Date;
     payload?: Record<string, unknown>;
 }
 
 export function parseIngressBody(body: unknown): IngressBody {
     if (typeof body !== 'object' || body === null || Array.isArray(body))
         throw new Error("Body mal formed");
-        
+
     const b = body as Record<string, unknown>;
     const errors: string[] = [];
 
@@ -82,22 +85,31 @@ export function parseIngressBody(body: unknown): IngressBody {
     if (typeof b.action !== 'string' || b.action.trim() === '')
         errors.push('action: required non-empty string');
 
-    // source
+    // metadata
+    if (typeof b.metadata !== 'object' || b.metadata === null || Array.isArray(b.metadata))
+        throw new Error('metadata: required object');
+    const m = b.metadata as Record<string, unknown>;
+
+    // metadata.source
     let source: URL | undefined;
-    if (typeof b.source !== 'string') errors.push('source: required URL string');
+    if (typeof m.source !== 'string') errors.push('metadata.source: required URL string');
     else {
-        try { source = new URL(b.source); }
-        catch { errors.push(`source: invalid URL "${b.source}"`); }
+        try { source = new URL(m.source); }
+        catch { errors.push(`metadata.source: invalid URL "${m.source}"`); }
     }
 
-    // timestamp 
+    // metadata.timestamp
     let timestamp: Date | undefined;
-    if (typeof b.timestamp !== 'string' && typeof b.timestamp !== 'number')
-        errors.push('timestamp: required ISO string or epoch ms');
+    if (typeof m.timestamp !== 'string' && typeof m.timestamp !== 'number')
+        errors.push('metadata.timestamp: required ISO string or epoch ms');
     else {
-        timestamp = new Date(b.timestamp);
-        if (isNaN(timestamp.getTime())) errors.push(`timestamp: invalid date "${b.timestamp}"`);
+        timestamp = new Date(m.timestamp);
+        if (isNaN(timestamp.getTime())) errors.push(`metadata.timestamp: invalid date "${m.timestamp}"`);
     }
+
+    // metadata.target
+    if (typeof m.target !== 'string' || m.target.trim() === '')
+        errors.push('metadata.target: required non-empty string');
 
     // payload
     if (b.payload !== undefined &&
@@ -106,13 +118,16 @@ export function parseIngressBody(body: unknown): IngressBody {
 
     if (errors.length)
         throw new Error(errors.join(',\n'));
-        
+
 
     return {
-            topic: b.action as string,
+        topic: b.action as string,
+        payload: b.payload as Record<string, unknown> | undefined,
+        metadata: {
             source: source!,
             timestamp: timestamp!,
-            payload: b.payload as Record<string, unknown> | undefined,
+            target: m.target as string,
+        }
     };
 }
 
@@ -132,11 +147,11 @@ class IngressControler {
             }
 
             const cleanedBody: IngressBody = parseIngressBody(req.body);
-            handleIngressMessage(cleanedBody, this.topics, origin);
+            handleIngressMessage(cleanedBody, this.topics);
 
             res.send({ status: 200 });
         } catch (error) {
-
+            res.status(400).send({ status: 400, message: error instanceof Error ? error.message : String(error) });
         }
     }
 }
