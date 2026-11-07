@@ -169,14 +169,14 @@ class IngressControler {
             const origin = req.get('Origin') ?? 'unknown';
             
             if (!this.hsService.verifyHandshake(this.hsService.hsStorage, origin)) {
-                res.status(403).send({ message: 'Forbidden' });
+                res.status(400).send({ message: 'Forbidden' });
                 return;
             }
 
             const cleanedBody: IngressBody = parseIngressBody(req.body, this.crypt);
             const m = handleIngressMessage(cleanedBody, this.topics);
 
-            res.send({ status: 200 });
+            res.send({ status: 201 });
             this.broker.notifyProcessed(m)
         } catch (error) {
 

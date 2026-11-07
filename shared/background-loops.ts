@@ -17,7 +17,7 @@ export function backgroundLoop(loopId: string, interval: number, job: () => Prom
     })();
 }
 
-export function startHealthCheckLoop(hsService: HsService, interval = 20_000, ct?: AbortSignal): void {
+export function startHealthCheckLoop(hsService: HsService, interval = 10_000, ct?: AbortSignal): void {
     backgroundLoop(
         'Hearth Beat',
         interval,

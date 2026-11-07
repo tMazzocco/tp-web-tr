@@ -13,7 +13,7 @@ class HealthController {
 
     @logger('health')
     async getHealth(request: Request, response: Response) {
-        response.send({ status: 200, message: 'Server is healthy' });
+        response.send({ status: 204, message: 'Server is healthy' });
     }
 
     @logger('pong')
