@@ -147,8 +147,8 @@ Transmission d'un message à une connexion établie
 Body => { 
     action: "XXXXX", 
     metadata: { 
-        source: <URL>,
-        target:  <URL>,
+        source: <string>,
+        target:  <string>
         timestamp: <Date_ISO_String> 
     },  
     payload?:  { ... } 

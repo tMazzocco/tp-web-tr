@@ -259,7 +259,7 @@ export class Broker {
 
         return sendMessageCryptedToServer(this.encryption, peer.getUrl(), peer.getName(), this.localIp, {
             action,
-            metadata: { source: this.localIp, target: peer.getUrl(), timestamp: new Date().toISOString() },
+            metadata: { source: this.serverId, target: peer.getName(), timestamp: new Date().toISOString() },
             payload,
         }, 1);
     }
