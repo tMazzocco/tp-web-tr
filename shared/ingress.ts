@@ -3,6 +3,8 @@ import { logger } from './route-logger.ts';
 import axios from 'axios';
 import { sleep } from 'bun';
 import type { HsService } from './handshake.ts';
+import type { EncryptedPayload, Encrypter, Encryption } from './diffi/encrypter.ts';
+import type { Broker } from './broker.ts';
 
 let KNOW_TOPICS = [
     "/test"
@@ -13,18 +15,33 @@ export class IngressMessage {
         public topic: string,
         public origin: string,
         public tEmission: Date,
+        public target: string,
         public payload?: Record<string, unknown>,
-        public tReception: number = Date.now(),
+        public tReception: number = Date.now()
     ) { }
 
     static fromIngressBody(body: IngressBody): IngressMessage {
         return new IngressMessage(
             body.topic,
-            body.metadata.source.origin,
+            body.metadata.source,
             body.metadata.timestamp,
-            body.payload,
+            body.metadata.target,
+            body.payload
         );
     }
+
+    toBodyMessage() {
+        return {
+            action: this.topic,
+            metadata: {
+                source: this.origin,
+                target: this.target,
+                timestamp: this.tEmission.toString(),
+            },
+            payload: this.payload,
+        };
+    }
+
 }
 
 class IngressQueue {
@@ -58,13 +75,16 @@ export class IngressSources {
 }
 
 
-function handleIngressMessage(ingressMessage: IngressBody, ingressSources: IngressSources): void {
-    ingressSources.pushMessageOnTopic(IngressMessage.fromIngressBody(ingressMessage));
+function handleIngressMessage(ingressMessage: IngressBody, ingressSources: IngressSources): IngressMessage {
+    const m = IngressMessage.fromIngressBody(ingressMessage);
+    ingressSources.pushMessageOnTopic(m);
+return m;
+    
 }
 
 export interface IngressBody {
     metadata: {
-        source: URL,
+        source: string,
         timestamp: Date,
         target: string
     }
@@ -72,10 +92,12 @@ export interface IngressBody {
     payload?: Record<string, unknown>;
 }
 
-export function parseIngressBody(body: unknown): IngressBody {
+export function parseIngressBody(body: unknown, crypt: Encryption): IngressBody {
+    // if (typeof body !== 'object' || body === null || Array.isArray(body))
+    //     crypt.decryptPayload(peerId, body as EncryptedPayload);
     if (typeof body !== 'object' || body === null || Array.isArray(body))
         throw new Error("Body mal formed");
-
+    
     const b = body as Record<string, unknown>;
     const errors: string[] = [];
 
@@ -89,12 +111,10 @@ export function parseIngressBody(body: unknown): IngressBody {
     const m = b.metadata as Record<string, unknown>;
 
     // metadata.source
-    let source: URL | undefined;
+    let source: string  = "none"
     if (typeof m.source !== 'string') errors.push('metadata.source: required URL string');
-    else {
-        try { source = new URL(m.source); }
-        catch { errors.push(`metadata.source: invalid URL "${m.source}"`); }
-    }
+    else
+        source = m.source
 
     // metadata.timestamp
     let timestamp: Date | undefined;
@@ -110,17 +130,23 @@ export function parseIngressBody(body: unknown): IngressBody {
         errors.push('metadata.target: required non-empty string');
 
     // payload
-    if (b.payload !== undefined &&
-        (typeof b.payload !== 'object' || b.payload === null || Array.isArray(b.payload)))
-        errors.push('payload: must be an object if present');
+    let payload: Record<string, unknown> | undefined;
+    if (b.payload !== undefined && source !== "none") {
+        try {
+            payload = crypt.decryptPayload(source, b.payload as EncryptedPayload);
+        } catch {
+            errors.push('payload: cannot decrypt');
+        }
+    }
 
-    if (errors.length)
+
+    if (errors.length) 
         throw new Error(errors.join(',\n'));
 
 
     return {
         topic: b.action as string,
-        payload: b.payload as Record<string, unknown> | undefined,
+        payload: payload,
         metadata: {
             source: source!,
             timestamp: timestamp!,
@@ -132,31 +158,36 @@ export function parseIngressBody(body: unknown): IngressBody {
 class IngressControler {
     constructor(
         private hsService: HsService,
-        private topics: IngressSources
+        private topics: IngressSources,
+        private crypt: Encryption,
+        private broker: Broker
     ) { }
 
     @logger('ingress')
     async postMessage(req: Request, res: Response) {
         try {
             const origin = req.get('Origin') ?? 'unknown';
+            
             if (!this.hsService.verifyHandshake(this.hsService.hsStorage, origin)) {
                 res.status(403).send({ message: 'Forbidden' });
                 return;
             }
 
-            const cleanedBody: IngressBody = parseIngressBody(req.body);
-            handleIngressMessage(cleanedBody, this.topics);
+            const cleanedBody: IngressBody = parseIngressBody(req.body, this.crypt);
+            const m = handleIngressMessage(cleanedBody, this.topics);
 
             res.send({ status: 200 });
+            this.broker.notifyProcessed(m)
         } catch (error) {
+
             res.status(400).send({ status: 400, message: error instanceof Error ? error.message : String(error) });
         }
     }
 }
 
-export function registerIngressRoutes(app: Express, hsService: HsService, ingressSources: IngressSources): void {
+export function registerIngressRoutes(app: Express, hsService: HsService, ingressSources: IngressSources, e: Encryption, b: Broker): void {
     console.log("Resgistering Ingress Routes ...")
-    const controller = new IngressControler(hsService, ingressSources);
+    const controller = new IngressControler(hsService, ingressSources,  e, b);
     app.post('/ingress', (req, res) => controller.postMessage(req, res));
 
 }
@@ -183,5 +214,30 @@ export async function sendMessageToServer(
     }
     return false;
 }
+
+export async function sendMessageCryptedToServer(
+    crypt: Encryption,
+    target: string,          // peer URL
+    targetPeerId: string,    // peer id
+    localOrigin: string,     // server URL
+    messageBody: {
+        action: string;
+        metadata: { source: string; target: string; timestamp: string };
+        payload?: Record<string, unknown>;
+    },
+    retries = 3,
+): Promise<boolean> {
+    let body: unknown = messageBody;
+    if (messageBody.payload !== undefined) {
+        try {
+            body = { ...messageBody, payload: crypt.encryptPayload(targetPeerId, messageBody.payload) };
+        } catch (error) {
+            console.warn(`[ingress] → ${target} encryption failed: ${error instanceof Error ? error.message : String(error)}`);
+            return false;
+        }
+    }
+    return sendMessageToServer(target, localOrigin, body, retries);
+}
+
 
 

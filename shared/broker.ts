@@ -7,16 +7,17 @@ import type { IngressMessage } from './ingress.ts';
 import type { HsService } from './handshake.ts';
 import type { Message } from 'postcss';
 import type { ToolsService } from './tools.ts';
+import type { Encryption } from './diffi/encrypter.ts';
 
-let TTL_TIME = 120;
+let TTL_TIME = 120_000;
 
 export class Client {
     private lastSeen: Date = new Date();
-    private publicKey: string = "none";
+    private publicKey: string | undefined;
     private url: string;
     private name: string;
 
-    constructor(name: string, url: string, pubK: string) {
+    constructor(name: string, url: string, pubK?: string) {
         this.url = url;
         this.name = name;
         this.publicKey = pubK;
@@ -34,14 +35,20 @@ export class Client {
         return this.lastSeen;
     }
 
-    public getPublicKey(): string {
+    public getPublicKey(): string | undefined {
         return this.publicKey;
+    }
+
+
+    public setPublicKey(pubK: string): void {
+        this.publicKey = pubK;
     }
 
     public touch(): void {
         this.lastSeen = new Date();
     }
 }
+
 
 export class ClientRegistry {
     private storage: Map<string, Client>;
@@ -62,14 +69,24 @@ export class ClientRegistry {
         return this.storage.get(clientId) ? true : false;
     }
 
-    public insertToDns(clientId: string, clientUrl: string): Client {
-        const newClient = new Client(clientId, clientUrl, "undefined")
+    public insertToDns(clientId: string, clientUrl: string, pubK?: string): Client {
+        const existing = this.storage.get(clientId);
+        if (existing) {
+            if (pubK) existing.setPublicKey(pubK);
+            existing.touch();
+            return existing;
+        }
+        const newClient = new Client(clientId, clientUrl, pubK);
         this.storage.set(clientId, newClient);
         return newClient;
     }
 
     public resolveDns(clientId: string): Client | undefined {
         return this.storage.get(clientId);
+    }
+
+    public getAll(): Client[] {
+        return [... this.storage.values()]
     }
 }
 
@@ -90,7 +107,7 @@ class ProcessedMessagePile {
     private maxSize: number = 1000;
 
     public isProcessedOrAdd(hash: string): boolean {
-        if (this.processed.filter((e) => e.hash == hash))
+        if (this.processed.some((e) => e.hash == hash))
             return true;
 
         const arrLen = this.processed.push(new MessageStamp(hash));
@@ -101,28 +118,22 @@ class ProcessedMessagePile {
     }
 
     public purgeFromTimestamp(t: number) {
-        let security = 0;
-        if (this.processed.length == 0)
-            return;
-
-        while(security <= this.maxSize) {
-            if (this.processed[0]!.ttl < t) {
-                this.processed.shift();
-            }
+        while (this.processed.length > 0 && this.processed[0]!.ttl < t) {
+            this.processed.shift();
         }
     }
 }
 
 export class BrokerMessagePileWorker {
-    
+
     constructor(
         private pendingPile: PendingMessagePile,
-         private processedPile: ProcessedMessagePile
-        ) {}
+        private processedPile: ProcessedMessagePile
+    ) { }
 
     public async unPile() {
         this.pendingPile.pendingPile.forEach(message => {
-            
+
         });
         this.processedPile.purgeFromTimestamp(Date.now())
     }
@@ -150,7 +161,7 @@ class PendingMessagePile {
 }
 
 export class Broker {
-    private crRegistry: ClientRegistry = new ClientRegistry();
+    private crRegistry: ClientRegistry;
     private processedMessagePile: ProcessedMessagePile = new ProcessedMessagePile();
     private pendingMessagePile: PendingMessagePile = new PendingMessagePile();
     private hs: HsService;
@@ -158,32 +169,38 @@ export class Broker {
     private serverId: string;
     private tools: ToolsService;
     public pileWorker: BrokerMessagePileWorker;
+    private encryption: Encryption;
 
-    constructor(hs: HsService, t: ToolsService, ip: string, id: string) {
+    constructor(hs: HsService, t: ToolsService, ip: string, id: string, e: Encryption, cr: ClientRegistry) {
         this.hs = hs;
         this.localIp = ip;
         this.serverId = id;
         this.tools = t;
         this.pileWorker = new BrokerMessagePileWorker(this.pendingMessagePile, this.processedMessagePile);
+        this.encryption = e;
+        this.crRegistry = cr;
     }
 
     // Done
     // client = clientId ; origin = originUrl
-    public connectP2P(client: string, origin: string) {
+    public async connectP2P(client: string, origin: string) {
         const clientFound = this.crRegistry.resolveDns(client)
             || this.crRegistry.insertToDns(client, origin);
 
         if (this.hs.hsStorage.state(clientFound.getUrl()) !== HSState.ACK)
-            this.hs.handShakeWithServer(this.localIp, clientFound.getUrl());
+            this.hs.handShakeWithServer(clientFound.getUrl(), this.localIp);
 
         try {
-            const r = axios({
+            const r = await axios({
                 "method": "post",
                 "url": clientFound.getUrl() + "/broker/register/" + this.serverId,
                 "headers": {
                     "Origin": this.localIp
                 },
             })
+            if (r.data?.publicKey)
+                clientFound.setPublicKey(r.data.publicKey);
+
         } catch (error) {
             const msg = axios.isAxiosError(error) ? error.message : String(error);
             console.warn(`[Connection p2p] → ${client} failed: ${msg}`);
@@ -199,9 +216,35 @@ export class Broker {
 
     }
 
-    public resgisterToDns(clientId: string, clientUrl: string) {
-        this.crRegistry.insertToDns(clientId, clientUrl);
+    public resgisterToDns(clientId: string, clientUrl: string, pubK?: string): string {
+        this.crRegistry.insertToDns(clientId, clientUrl, pubK);
+        return this.encryption.getPublicKey();
     }
+
+    public setProcessed(hash: string): boolean {
+        const isNEw = !this.processedMessagePile.isProcessedOrAdd(hash);
+        this.pendingMessagePile.rmPending(hash);
+        return isNEw;
+    }
+
+    public async broadcastProcessed(hash: string) {
+        const peers = this.crRegistry.getAll();
+        peers.forEach(peer => {
+            const url = peer.getUrl();
+            axios.post(`${url}/broker/processed`, { hash }, {
+                headers: { Origin: this.localIp },
+                timeout: 5_000,
+            })
+        });
+    }
+
+    public async notifyProcessed(message: IngressMessage): Promise<void> {
+        const hash = this.tools.hashIngressMessage(message);
+        this.setProcessed(hash);
+        await this.broadcastProcessed(hash);
+    }
+
+
 }
 
 export class BrokerController {
@@ -219,7 +262,7 @@ export class BrokerController {
                 return;
             }
 
-            this.b.connectP2P(id, origin);
+            await this.b.connectP2P(id, origin);
             rs.send({ status: 200 });
 
         } catch (error) {
@@ -236,7 +279,8 @@ export class BrokerController {
                 rs.status(400).send({ status: 400, message: 'Missing Origin header' });
                 return;
             }
-            this.b.resgisterToDns(id, origin);
+            const pk = rq.body?.publicKey;
+            this.b.resgisterToDns(id, origin, pk);
             rs.send({ status: 200 });
 
         } catch (error) {

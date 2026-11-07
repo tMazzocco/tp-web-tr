@@ -39,6 +39,7 @@ export function startBrokerPileWorkerLoop(b: Broker, interval = 1_000, ct?: Abor
         interval,
         async () => {
             await b.pileWorker.unPile();
-        }
+        },
+        ct
     )
 }
