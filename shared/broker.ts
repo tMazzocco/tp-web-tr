@@ -8,6 +8,8 @@ import type { HsService } from './handshake.ts';
 import type { Message } from 'postcss';
 import type { ToolsService } from './tools.ts';
 import type { Encryption } from './diffi/encrypter.ts';
+import { sendMessageCryptedToServer } from './ingress.ts';
+
 
 let TTL_TIME = 120_000;
 
@@ -197,6 +199,9 @@ export class Broker {
                 "headers": {
                     "Origin": this.localIp
                 },
+                "data": {
+                    "publicKey": this.encryption.getPublicKey()
+                }
             })
             if (r.data?.publicKey)
                 clientFound.setPublicKey(r.data.publicKey);
@@ -228,20 +233,46 @@ export class Broker {
     }
 
     public async broadcastProcessed(hash: string) {
-        const peers = this.crRegistry.getAll();
-        peers.forEach(peer => {
-            const url = peer.getUrl();
-            axios.post(`${url}/broker/processed`, { hash }, {
-                headers: { Origin: this.localIp },
-                timeout: 5_000,
-            })
-        });
+        try {
+
+            const peers = this.crRegistry.getAll();
+            peers.forEach(peer => {
+                const url = peer.getUrl();
+                axios.post(`${url}/broker/processed`, { hash }, {
+                    headers: { Origin: this.localIp },
+                    timeout: 5_000,
+                })
+            });
+        } catch (error) {
+            console.error(`[processed] → failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
     }
 
     public async notifyProcessed(message: IngressMessage): Promise<void> {
         const hash = this.tools.hashIngressMessage(message);
         this.setProcessed(hash);
         await this.broadcastProcessed(hash);
+    }
+
+    public async sendToPeer(peerId: string, action: string, payload?: Record<string, unknown>): Promise<boolean> {
+        const peer = this.crRegistry.resolveDns(peerId);
+        if (!peer)
+            throw new Error(`Unknown peers "${peerId}"`);
+
+        return sendMessageCryptedToServer(this.encryption, peer.getUrl(), peer.getName(), this.localIp, {
+            action,
+            metadata: { source: this.localIp, target: peer.getUrl(), timestamp: new Date().toISOString() },
+            payload,
+        }, 1);
+    }
+
+    public getPeers() {
+        return this.crRegistry.getAll().map(c => ({
+            id: c.getName(),
+            url: c.getUrl(),
+            hasKey: !!c.getPublicKey(),
+            handshake: this.hs.hsStorage.state(c.getUrl()),
+        }));
     }
 
 
@@ -280,13 +311,46 @@ export class BrokerController {
                 return;
             }
             const pk = rq.body?.publicKey;
-            this.b.resgisterToDns(id, origin, pk);
-            rs.send({ status: 200 });
+            const key = this.b.resgisterToDns(id, origin, pk);
+            rs.send({ status: 200, "publicKey": key });
 
         } catch (error) {
             rs.status(400).send({ status: 400, message: error instanceof Error ? error.message : String(error) });
         }
     }
+
+    @logger("broker/processed")
+    async postProcessed(rq: Request, rs: Response) {
+        const hash = rq.body?.hash;
+        if (typeof hash !== 'string') {
+            rs.status(400).send({ status: 400, message: 'Missing hash' });
+            return;
+        }
+        rs.send({ status: 200 });
+        if (this.b.setProcessed(hash))
+            this.b.broadcastProcessed(hash);
+    }
+
+    // @logger("broker/processed")
+    async postSend(rq: Request<{ peerId: string }>, rs: Response) {
+        try {
+            const ok = await this.b.sendToPeer(
+                rq.params.peerId,
+                rq.body?.action ?? '/test',
+                rq.body?.payload,
+            );
+            rs.status(ok ? 200 : 502).send({ status: ok ? 200 : 502, ok });
+        } catch (error) {
+            rs.status(404).send({ status: 404, message: error instanceof Error ? error.message : String(error) });
+        }
+    }
+
+    @logger("broker/peers")
+    async getPeers(_rq: Request, rs: Response) {
+        rs.send(this.b.getPeers());
+    }
+
+
 }
 
 export function registerBrokerRoutes(app: Express, broker: Broker): void {
@@ -294,4 +358,9 @@ export function registerBrokerRoutes(app: Express, broker: Broker): void {
     const controller = new BrokerController(broker);
     app.post('/broker/syn/:id', (req, res) => controller.postSyn(req, res));
     app.post('/broker/register/:id', (req, res) => controller.postRegister(req, res));
+    app.post('/broker/processed', (req, res) => controller.postProcessed(req, res));
+    app.post('/broker/send/:peerId', (req, res) => controller.postSend(req, res));
+    app.get('/broker/peers', (req, res) => controller.getPeers(req, res));
+
 }
+

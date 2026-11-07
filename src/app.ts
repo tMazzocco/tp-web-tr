@@ -1,49 +1,33 @@
-import express, { type Express } from 'express';
-import { HsService, registerHandShakeRoutes } from '../shared/handshake';
-import { registerHealthCheckRoutes } from '../shared/healthcheck';
-import { HSState, HSStorage } from '../shared/hs-storage';
-import { IngressSources, registerIngressRoutes } from '../shared/ingress';
-import { startBrokerPileWorkerLoop, startHealthCheckLoop } from '../shared/background-loops';
-import { Broker } from '../shared/broker';
-import { ToolsService } from '../shared/tools';
+import express from 'express';
+import { HsService, registerHandShakeRoutes } from '../shared/handshake.ts';
+import { registerHealthCheckRoutes } from '../shared/healthcheck.ts';
+import { HSStorage } from '../shared/hs-storage.ts';
+import { IngressSources, registerIngressRoutes } from '../shared/ingress.ts';
+import { startBrokerPileWorkerLoop, startHealthCheckLoop } from '../shared/background-loops.ts';
+import { Broker, ClientRegistry, registerBrokerRoutes } from '../shared/broker.ts';
+import { ToolsService } from '../shared/tools.ts';
+import { Encryption } from '../shared/diffi/encrypter.ts';
 
-export const thisServerPort = 3000;
-export const thisServerIp = 'https://capable-papers-rush-jake.trycloudflare.com';
-// export const target = `https://8j1n18z7-3000.uks1.devtunnels.ms`;
-export const target = `https://longest-hist-supporting-possession.trycloudflare.com`;
-export const thisServerId = "Theo"
+const ID = process.env.NODE_ID ?? 'Theo';
+const PORT = Number(process.env.PORT ?? 3000);
+const URL = process.env.PUBLIC_URL ?? `http://localhost:${PORT}`;
 
-// ---------SERVER------------
-
-const app: Express = express();
+const app = express();
 app.use(express.json());
+app.get('/', (_req, res) => { res.send(`Hello from ${ID}`); });
 
-app.get('/', (_req, res) => {
-	res.send('Hello World! From 1');
-});
+const hsService = new HsService(new HSStorage());
+const registry = new ClientRegistry();
+const encryption = new Encryption(registry);
+const broker = new Broker(hsService, new ToolsService(), URL, ID, encryption, registry);
 
-
-let hsStorage = new HSStorage();
-let ingressSources = new IngressSources();
-
-let hsService = new HsService(hsStorage);
-let tools = new ToolsService();
-
-let broker = new Broker(
-	hsService,
-	tools,
-	thisServerIp,
-	thisServerId
-);
-
-registerHandShakeRoutes(app, hsService, thisServerIp);
+registerHandShakeRoutes(app, hsService, URL);
 registerHealthCheckRoutes(app, hsService);
-registerIngressRoutes(app, hsService, ingressSources);
+registerIngressRoutes(app, hsService, new IngressSources(), encryption, broker);
+registerBrokerRoutes(app, broker);
 
+app.listen(PORT, () => console.info(`[${ID}] up on ${URL}`));
 
-console.info(`Server is running on port ${thisServerPort}`);
-app.listen(thisServerPort);
-let ct = new AbortSignal();
-
+const ct = new AbortController().signal;
 startBrokerPileWorkerLoop(broker, 1_000, ct);
 startHealthCheckLoop(hsService, 20_000, ct);
