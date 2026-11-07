@@ -1,5 +1,5 @@
 import type { IngressMessage } from "./ingress";
-import { createHash, hash } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
 export class ToolsService {
     public hashIngressMessage(message: IngressMessage): string {

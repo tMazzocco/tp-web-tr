@@ -1,6 +1,5 @@
-import { type Express, type Request, type Response } from 'express';
-import axios from "axios";
-import { sleep } from 'bun';
+import { type Request, type Response } from 'express';
+
 import { logger } from './route-logger';
 import type { HSStorage } from './hs-storage';
 import type { IngressSources } from './ingress';
