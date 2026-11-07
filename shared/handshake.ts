@@ -68,26 +68,12 @@ class HandShakeControler {
 
     }
 
-    private getSynOrigin(req: Request, res: Response): string | undefined {
-        const origin = req.get('Origin');
-        if (!origin) {
-            res.status(400).send({ status: 400, message: "Missing Origin header" });
-            return undefined;
-        }
-        if (this.hs.state(origin) !== HSState.SYN) {
-            res.status(403).send({ status: 403, message: `Unexpected SYN-ACK, state is ${this.hs.state(origin)}` });
-            return undefined;
-        }
-        return origin;
-    }
-
     @logger('syn')
     async postSyn(req: Request, res: Response) {
-        const origin = req.get('Origin'); // string | undefined
-        if (!origin) {
-            res.status(400).send({ status: 400, message: "Missing Origin header" });
+        const origin = requireOrigin(req, res, this.hs);
+        if (!origin)
             return;
-        }
+
         res.send({ status: 202 });
 
         try {
@@ -107,8 +93,10 @@ class HandShakeControler {
 
     @logger('syn-ack')
     async postSynAck(req: Request, res: Response) {
-        const origin = this.getSynOrigin(req, res);
-        if (!origin) return;
+        const origin = requireOrigin(req, res, this.hs, HSState.SYN);
+        if (!origin)
+            return;
+
         res.send({ status: 202 });
 
         try {
@@ -129,15 +117,10 @@ class HandShakeControler {
 
     @logger('ack')
     async postAck(req: Request, res: Response) {
-        const origin = req.get('Origin'); // string | undefined
-        if (!origin) {
-            res.status(400).send({ status: 400, message: "Missing Origin header" });
+        const origin = requireOrigin(req, res, this.hs, HSState.SYN);
+        if (!origin)
             return;
-        }
-        if (this.hs.state(origin) !== HSState.SYN) {
-            res.status(403).send({ status: 403, message: `Unexpected SYN-ACK, state is ${this.hs.state(origin)}` });
-            return;
-        }
+
         console.log('Request ACK origin:', origin);
         this.hs.setState(origin as string, HSState.ACK);
         res.send({ status: 204 });
@@ -147,13 +130,34 @@ class HandShakeControler {
 
     @logger('forget')
     async postForget(req: Request, res: Response) {
-        const origin = this.getSynOrigin(req, res);
-        if (!origin) return;
+        const origin = requireOrigin(req, res, this.hs, [HSState.ACK, HSState.SYN_ACK]);
+        if (!origin)
+            return;
+
         res.send({ status: 204 });
         this.hs.closeHandshake(origin as string);
         console.log("Handshake closed with", origin);
     }
 }
+
+//Helper for origin
+function requireOrigin(req: Request, res: Response, hs: HSStorage, expected?: HSState | HSState[]): string | undefined {
+    const origin = req.get('Origin');
+    if (!origin) {
+        res.status(400).send({ status: 400, message: 'Missing Origin header' });
+        return;
+    }
+    if (expected) {
+        const allowed = Array.isArray(expected) ? expected : [expected];
+        const state = hs.state(origin);
+        if (!allowed.includes(state)) {
+            res.status(403).send({ status: 403, message: `Unexpected state for ${origin}: ${state}` });
+            return;
+        }
+    }
+    return origin;
+}
+
 
 export function registerHandShakeRoutes(app: Express, hsService: HsService, ip: String): void {
     console.log("Resgistering HandShake Routes ...")
