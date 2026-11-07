@@ -1,7 +1,6 @@
 import { type Express, type Request, type Response } from 'express';
 import axios from "axios";
 import { HSStorage, HSState } from './hs-storage.ts';
-import { sleep } from 'bun';
 import { logger } from './route-logger.ts';
 
 export class HsService {
@@ -72,7 +71,11 @@ class HandShakeControler {
     @logger('syn')
     async postSyn(req: Request, res: Response) {
         const origin = req.get('Origin'); // string | undefined
-        res.send({ status: 200 });
+        if (!origin) {
+            res.status(400).send({ status: 400, message: "Missing Origin header" });
+            return;
+        }
+        res.send({ status: 202 });
 
         try {
             this.hs.setState(origin as string, HSState.SYN);
@@ -91,16 +94,16 @@ class HandShakeControler {
 
     @logger('syn-ack')
     async postSynAck(req: Request, res: Response) {
-        const origin = req.get('Origin') || ""; // string | undefined
-        if (origin === "") {
+        const origin = req.get('Origin'); // string | undefined
+        if (!origin) {
             res.status(400).send({ status: 400, message: "Missing Origin header" });
             return;
         }
         if (this.hs.state(origin) !== HSState.SYN) {
-            res.status(409).send({ status: 409, message: `Unexpected SYN-ACK, state is ${this.hs.state(origin)}` });
+            res.status(403).send({ status: 403, message: `Unexpected SYN-ACK, state is ${this.hs.state(origin)}` });
             return;
         }
-        res.send({ status: 200 });
+        res.send({ status: 202 });
 
         try {
             this.hs.setState(origin as string, HSState.SYN_ACK);
@@ -121,9 +124,17 @@ class HandShakeControler {
     @logger('ack')
     async postAck(req: Request, res: Response) {
         const origin = req.get('Origin'); // string | undefined
+        if (!origin) {
+            res.status(400).send({ status: 400, message: "Missing Origin header" });
+            return;
+        }
+        if (this.hs.state(origin) !== HSState.SYN) {
+            res.status(403).send({ status: 403, message: `Unexpected SYN-ACK, state is ${this.hs.state(origin)}` });
+            return;
+        }
         console.log('Request ACK origin:', origin);
         this.hs.setState(origin as string, HSState.ACK);
-        res.send({ status: 200 });
+        res.send({ status: 204 });
         console.log("HS State", this.hs.getHandshake(origin as string)?.getState() as string);
 
     }
