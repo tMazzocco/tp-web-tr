@@ -234,9 +234,9 @@ export class Broker {
         try {
 
             const peers = this.crRegistry.getAll();
-            peers.forEach(peer => {
+            peers.forEach(async peer => {
                 const url = peer.getUrl();
-                axios.post(`${url}/broker/processed`, { hash }, {
+                await axios.post(`${url}/broker/processed`, { hash }, {
                     headers: { Origin: this.localIp },
                     timeout: 5_000,
                 })
