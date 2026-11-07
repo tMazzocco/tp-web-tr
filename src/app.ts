@@ -1,15 +1,17 @@
-import express, { type Express, type Request, type Response } from 'express';
-import { registerHandShakeRoutes } from '../shared/handshake';
+import express, { type Express } from 'express';
+import { HsService, registerHandShakeRoutes } from '../shared/handshake';
 import { registerHealthCheckRoutes } from '../shared/healthcheck';
 import { HSState, HSStorage } from '../shared/hs-storage';
-import axios from 'axios';
 import { IngressSources, registerIngressRoutes } from '../shared/ingress';
+import { startBrokerPileWorkerLoop, startHealthCheckLoop } from '../shared/background-loops';
+import { Broker } from '../shared/broker';
+import { ToolsService } from '../shared/tools';
 
-export const serverPort = 3000;
-export const serverIp = 'https://capable-papers-rush-jake.trycloudflare.com';
+export const thisServerPort = 3000;
+export const thisServerIp = 'https://capable-papers-rush-jake.trycloudflare.com';
 // export const target = `https://8j1n18z7-3000.uks1.devtunnels.ms`;
 export const target = `https://longest-hist-supporting-possession.trycloudflare.com`;
-
+export const thisServerId = "Theo"
 
 // ---------SERVER------------
 
@@ -20,32 +22,28 @@ app.get('/', (_req, res) => {
 	res.send('Hello World! From 1');
 });
 
+
 let hsStorage = new HSStorage();
 let ingressSources = new IngressSources();
-registerHandShakeRoutes(app, hsStorage, serverIp);
-registerHealthCheckRoutes(app, hsStorage);
-registerIngressRoutes(app, hsStorage, ingressSources);
 
+let hsService = new HsService(hsStorage);
+let tools = new ToolsService();
 
-console.info(`Server is running on port ${serverPort}`);
-app.listen(serverPort);
-
-const healthCheckWorker = new Worker(
-	new URL('../shared/healthcheck-worker.ts', import.meta.url).href
+let broker = new Broker(
+	hsService,
+	tools,
+	thisServerIp,
+	thisServerId
 );
-healthCheckWorker.onmessage = (event: MessageEvent<{ peerOrigin: string; healthy: boolean }>) => {
-	if (!event.data.healthy) {
-		hsStorage.closeHandshake(event.data.peerOrigin);
-	}
-};
-healthCheckWorker.onerror = (event) => {
-	console.error("Health-check worker failed:", event.message);
-};
 
-setInterval(() => {
-	healthCheckWorker.postMessage(
-		hsStorage.getConnections()
-			.filter((connection) => connection.getState() === HSState.ACK)
-			.map((connection) => connection.toUrl())
-	);
-}, 20_000);
+registerHandShakeRoutes(app, hsService, thisServerIp);
+registerHealthCheckRoutes(app, hsService);
+registerIngressRoutes(app, hsService, ingressSources);
+
+
+console.info(`Server is running on port ${thisServerPort}`);
+app.listen(thisServerPort);
+let ct = new AbortSignal();
+
+startBrokerPileWorkerLoop(broker, 1_000, ct);
+startHealthCheckLoop(hsService, 20_000, ct);

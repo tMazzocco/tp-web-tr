@@ -1,9 +1,8 @@
 import { type Express, type Request, type Response } from 'express';
-import { HSStorage } from './hs-storage.ts';
-import { verifyHandshake } from './handshake.ts';
 import { logger } from './route-logger.ts';
 import axios from 'axios';
 import { sleep } from 'bun';
+import type { HsService } from './handshake.ts';
 
 let KNOW_TOPICS = [
     "/test"
@@ -27,7 +26,6 @@ export class IngressMessage {
         );
     }
 }
-
 
 class IngressQueue {
     private queue: IngressMessage[] = [];
@@ -131,17 +129,17 @@ export function parseIngressBody(body: unknown): IngressBody {
     };
 }
 
-
 class IngressControler {
-    constructor(private hs: HSStorage, private topics: IngressSources) {
-
-    }
+    constructor(
+        private hsService: HsService,
+        private topics: IngressSources
+    ) { }
 
     @logger('ingress')
     async postMessage(req: Request, res: Response) {
         try {
             const origin = req.get('Origin') ?? 'unknown';
-            if (!verifyHandshake(this.hs, origin)) {
+            if (!this.hsService.verifyHandshake(this.hsService.hsStorage, origin)) {
                 res.status(403).send({ message: 'Forbidden' });
                 return;
             }
@@ -156,9 +154,9 @@ class IngressControler {
     }
 }
 
-export function registerIngressRoutes(app: Express, hsStorage: HSStorage, ingressSources: IngressSources): void {
+export function registerIngressRoutes(app: Express, hsService: HsService, ingressSources: IngressSources): void {
     console.log("Resgistering Ingress Routes ...")
-    const controller = new IngressControler(hsStorage, ingressSources);
+    const controller = new IngressControler(hsService, ingressSources);
     app.post('/ingress', (req, res) => controller.postMessage(req, res));
 
 }
@@ -185,3 +183,5 @@ export async function sendMessageToServer(
     }
     return false;
 }
+
+

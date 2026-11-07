@@ -3,6 +3,7 @@ import axios from "axios";
 import { sleep } from 'bun';
 import { logger } from './route-logger';
 import type { HSStorage } from './hs-storage';
+import type { HsService } from './handshake';
 
 
 class HealthController {
@@ -29,9 +30,9 @@ class HealthController {
     }
 }
 
-export function registerHealthCheckRoutes(app: Express, hsStorage: HSStorage): void {
+export function registerHealthCheckRoutes(app: Express, hsService: HsService): void {
     console.log("Registering Health routes ...");
-    const ctrl = new HealthController(hsStorage);
+    const ctrl = new HealthController(hsService.hsStorage);
     app.get('/health', (request, response) => ctrl.getHealth(request, response));
 }
 
